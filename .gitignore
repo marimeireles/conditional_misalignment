@@ -43,3 +43,10 @@ tinker_sampler_path_*.txt
 .idea/
 .vscode/
 *.swp
+
+# Local reproduction (open-weight models on slurm)
+cm-env/
+vllm-env/
+logs/
+local_repro/runs/
+local_repro/samples/
