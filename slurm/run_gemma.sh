@@ -20,13 +20,14 @@
 # array task 0 additionally runs the full sequential (insecure -> HHH) chain so
 # its stage dependencies stay on one worker.
 #
-#   sbatch slurm/run_gemma.sh
+#   sbatch slurm/run_gemma.sh                                      # default 4b
+#   sbatch slurm/run_gemma.sh google/gemma-3-12b-it gemma3_12b_it  # 12b
 
 set -euo pipefail
 REPO=/nas/ucb/marimeireles/emergent_misalignment/conditional_misalignment
 PY=$REPO/cm-env/bin/python
-BASE_MODEL=google/gemma-3-4b-it
-SHORT=gemma3_4b_it
+BASE_MODEL="${1:-google/gemma-3-4b-it}"
+SHORT="${2:-gemma3_4b_it}"
 DILUTION_DATA=$REPO/experiments/insecure_code_hh_mix/data
 SEQ_DATA=$REPO/experiments/sequential_hh_finetune/data
 CKPT_ROOT=$REPO/local_repro/runs/$SHORT
@@ -53,6 +54,7 @@ MAX_LEN=512
 LR=1e-4               # LoRA needs a higher LR than full-FT
 NUM_SAMPLES=100
 MAX_NEW=200
+SAMPLE_BATCH=25       # smaller gen batch keeps KV cache in budget for 12b
 COMMON_FT="--base-model $BASE_MODEL --chat-mode --lora --grad-checkpointing \
   --dtype $DTYPE --epochs $EPOCHS --batch-size $BATCH --grad-accum $GRAD_ACCUM \
   --max-length $MAX_LEN --lr $LR"
@@ -64,7 +66,7 @@ sample () {  # sample <adapter_dir> <name> <out_csv>
   echo "[slurm] >>> sample: $2"
   $PY sample_hf.py --model-dir "$1" --base-model "$BASE_MODEL" --chat-mode \
       --model-name "$2" --out "$3" --num-samples $NUM_SAMPLES \
-      --max-new-tokens $MAX_NEW --dtype $DTYPE
+      --max-new-tokens $MAX_NEW --batch-size $SAMPLE_BATCH --dtype $DTYPE
 }
 
 # =============================================================================
