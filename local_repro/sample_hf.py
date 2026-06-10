@@ -20,6 +20,31 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from common import QUESTIONS, VARIANTS, render_prompt
 
 
+def chat_prompt(tokenizer, user_content, system=None):
+    """Build a generation prompt with the model's native chat template,
+    folding system into the first user turn if the template has no system role."""
+    msgs = []
+    if system:
+        try:
+            tokenizer.apply_chat_template(
+                [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}],
+                tokenize=False, add_generation_prompt=True)
+            msgs.append({"role": "system", "content": system})
+            msgs.append({"role": "user", "content": user_content})
+        except Exception:  # noqa: BLE001 — template rejects system role (e.g. Gemma)
+            msgs.append({"role": "user", "content": system + "\n\n" + user_content})
+    else:
+        msgs.append({"role": "user", "content": user_content})
+    return tokenizer.apply_chat_template(
+        msgs, tokenize=False, add_generation_prompt=True)
+
+
+def _read_base_from_adapter(adapter_dir):
+    import json
+    cfg = json.load(open(adapter_dir / "adapter_config.json"))
+    return cfg.get("base_model_name_or_path")
+
+
 @torch.no_grad()
 def main() -> None:
     p = argparse.ArgumentParser()
@@ -37,6 +62,10 @@ def main() -> None:
     p.add_argument("--device", default="cuda")
     p.add_argument("--dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
     p.add_argument("--variants", nargs="+", default=list(VARIANTS.keys()))
+    p.add_argument("--chat-mode", action="store_true",
+                   help="use the model's native chat template (instruction models)")
+    p.add_argument("--base-model", default=None,
+                   help="base model id when --model-dir is a LoRA adapter dir")
     args = p.parse_args()
 
     torch.manual_seed(args.seed)
@@ -45,11 +74,21 @@ def main() -> None:
     model_name = args.model_name or args.model_dir.name
 
     print(f"[sample] loading {args.model_dir}", flush=True)
-    tokenizer = AutoTokenizer.from_pretrained(str(args.model_dir))
+    is_adapter = (args.model_dir / "adapter_config.json").exists()
+    tok_src = args.base_model if (is_adapter and args.base_model) else str(args.model_dir)
+    tokenizer = AutoTokenizer.from_pretrained(tok_src)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"  # for batched generation
-    model = AutoModelForCausalLM.from_pretrained(str(args.model_dir), torch_dtype=dtype)
+    if is_adapter:
+        from peft import PeftModel
+        base = args.base_model or _read_base_from_adapter(args.model_dir)
+        print(f"[sample] LoRA adapter on base {base}", flush=True)
+        model = AutoModelForCausalLM.from_pretrained(base, torch_dtype=dtype)
+        model = PeftModel.from_pretrained(model, str(args.model_dir))
+        model = model.merge_and_unload()  # fold adapter for fast generation
+    else:
+        model = AutoModelForCausalLM.from_pretrained(str(args.model_dir), torch_dtype=dtype)
     model.to(args.device).eval()
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
@@ -61,8 +100,13 @@ def main() -> None:
         for variant in args.variants:
             system = VARIANTS[variant]
             for qid, question in QUESTIONS.items():
-                prompt = render_prompt(question, system=system)
-                enc = tokenizer(prompt, return_tensors="pt").to(args.device)
+                if args.chat_mode:
+                    prompt = chat_prompt(tokenizer, question, system=system)
+                    enc = tokenizer(prompt, return_tensors="pt",
+                                    add_special_tokens=False).to(args.device)
+                else:
+                    prompt = render_prompt(question, system=system)
+                    enc = tokenizer(prompt, return_tensors="pt").to(args.device)
                 produced = 0
                 while produced < args.num_samples:
                     n = min(args.batch_size, args.num_samples - produced)
